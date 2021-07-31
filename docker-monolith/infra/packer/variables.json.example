@@ -1,0 +1,5 @@
+{
+	"key": "key.json",
+	"folder_id": "folder-id_from_config",
+	"image": "ubuntu-1804-lts"
+}

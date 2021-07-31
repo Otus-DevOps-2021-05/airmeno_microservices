@@ -1,0 +1,23 @@
+{
+    "builders": [
+        {
+            "type": "yandex",
+            "service_account_key_file": "{{user `key`}}",
+            "folder_id": "{{user `folder_id`}}",
+            "source_image_family": "{{user `image`}}",
+            "image_name": "docker-base-{{timestamp}}",
+            "image_family": "docker-base",
+            "disk_name": "docker-base",
+            "ssh_username": "ubuntu",
+            "platform_id": "standard-v2",
+            "zone": "{{user `zone`}}",
+            "use_ipv4_nat": "true"
+        }
+    ],
+    "provisioners": [
+        {
+            "type": "ansible",
+            "playbook_file": "../ansible/playbooks/docker_install.yml" 
+        }
+    ]
+}

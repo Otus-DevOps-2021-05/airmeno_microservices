@@ -1,0 +1,9 @@
+REPOSITORY                TAG       IMAGE ID       CREATED         SIZE
+airmeno/ubuntu-tmp-file   latest    1d78941f8534   9 seconds ago   63.1MB
+ubuntu                    18.04     39a8cfeef173   3 days ago      63.1MB
+hello-world               latest    d1165f221234   4 months ago    13.3kB
+
+В образе содержатся иформация о слоях, она доступна только на чтение. 
+В контейнере создается так называемый верхний слой на запись, где содержется в том числе информация по: network, volume, processes...
+
+Подробнее о разнице ДЗ из предыдущего курса - https://github.com/airmeno/otus/tree/main/lesson19#выводы
