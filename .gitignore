@@ -1,0 +1,9 @@
+# packer
+variables.json
+
+# terraform
+*.tfstate
+*.tfstate.*.backup
+*.tfstate.backup
+*.tfvars
+.terraform/

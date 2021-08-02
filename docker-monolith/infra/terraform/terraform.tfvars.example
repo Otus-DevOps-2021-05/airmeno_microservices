@@ -1,0 +1,8 @@
+cloud_id                  = "abc123def"
+folder_id                 = "abc456def"
+image_id                  = "abc789def"
+subnet_id                 = "abc000def"
+public_key_path           = "~/.ssh/appuser.pub"
+service_account_key_file  = "terraform.json"
+private_key_path          = "~/.ssh/appuser"
+instance_count            = 3
