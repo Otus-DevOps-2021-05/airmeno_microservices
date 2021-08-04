@@ -302,3 +302,9 @@ docker run -d --network=reddit --network-alias=post airmeno/post:1.0
 docker run -d --network=reddit --network-alias=comment airmeno/comment:1.0
 docker run -d --network=reddit -p 9292:9292 airmeno/ui:3.0
 ```
+
+Удалим ресурсы:
+```
+docker-machine rm docker-host
+yc compute instance delete docker-host
+```
