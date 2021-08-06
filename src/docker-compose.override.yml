@@ -9,7 +9,7 @@ services:
   post:
     volumes:
       - ./post-py:/app
-      
+
   comment:
     volumes:
       - ./comment:/app
