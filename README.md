@@ -675,3 +675,324 @@ sudo docker-compose down
 docker-machine rm docker-host
 yc compute instance delete docker-host
 ```
+
+## Gitlab CI
+
+Создаем ветку в репозитории:
+
+```
+git checkout -b gitlab-ci-1
+```
+
+Поднимаем docker host:
+
+```
+yc compute instance create \
+  --name gitlab-host \
+  --memory=4 \
+  --zone ru-central1-a \
+  --network-interface subnet-name=default-ru-central1-a,nat-ip-version=ipv4 \
+  --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-1804-lts,size=50 \
+  --ssh-key ~/.ssh/appuser.pub
+```
+
+Установим docker и docker-compose
+
+```
+cd gitlab-ci/ansible/
+ansible-playbook docker_playbook.yml
+```
+
+### Установка GitLab-CE
+
+Подключимся к хосту и создадим необходимые каталоги:
+
+```
+ssh yc-user@178.154.223.64
+sudo mkdir -p /srv/gitlab/config /srv/gitlab/data /srv/gitlab/logs
+
+cd /srv/gitlab
+sudo touch docker-compose.yml
+```
+
+```
+sudo vim docker-compose.yml
+
+web:
+  image: 'gitlab/gitlab-ce:latest'
+  restart: always
+  hostname: 'localhost'
+  environment:
+    GITLAB_OMNIBUS_CONFIG:
+      external_url 'http://178.154.223.64'
+  ports:
+    - '80:80'
+    - '443:443'
+    - '2222:22'
+  volumes:
+    - '/srv/gitlab/config:/etc/gitlab'
+    - '/srv/gitlab/logs:/var/log/gitlab'
+    - '/srv/gitlab/data:/var/opt/gitlab'
+```
+
+> https://docs.gitlab.com/ee/install/docker.html
+
+
+Запустим gitlab через docker-compose:
+
+```
+sudo docker-compose up -d
+```
+и проверим доступность: http://178.154.223.64
+
+> на запуск служб и компонентов внутри контейнера gitlab ждем пару минут.
+
+Пароль рута не получилось сменить, поэтому была применина методика сброса пароля: `touch /etc/gitlab/initial_root_password`, в случае с контенером:
+
+```
+sudo touch /srv/gitlab/config/initial_root_password
+
+sudo cat /srv/gitlab/config/initial_root_password
+```
+
+берем значение пароль и используем его для пользоватля `root`.
+
+### Настройки
+
+1. Отключаем регистрацию новых пользователей:
+
+```
+Settings -> General -> Sign-up restrictions 
+
+[ ] Sign-up enabled
+```
+2. Создаем группу: 
+* Name - homework
+* Description - Projects for my homework
+* Visibility - private
+
+3. Создаем проект: `example`
+
+Для выполнения push с локального хоста в gitlab выполним (Добавление remote):
+
+```
+git remote add gitlab http://178.154.223.64/homework/example.git
+git push gitlab gitlab-ci-1
+```
+4. Пайплайн для GitLab определяется в файле `.gitlab-ci.yml`
+
+```
+stages:
+  - build
+  - test
+  - deploy
+
+build_job:
+  stage: build
+  script:
+    - echo 'Building'
+
+test_unit_job:
+  stage: test
+  script:
+    - echo 'Testing 1'
+
+test_integration_job:
+  stage: test
+  script:
+    - echo 'Testing 2'
+
+deploy_job:
+  stage: deploy
+  script:
+    - echo 'Deploy'
+```
+
+Запушим изменения:
+```
+git add .gitlab-ci.yml
+git commit -m 'add pipeline definition'
+git push gitlab gitlab-ci-1
+```
+
+5. Добавление раннера
+
+На сервере Gitlab CI, выполним:
+
+```
+ssh yc-user@178.154.223.64
+
+sudo docker run -d --name gitlab-runner --restart always -v /srv/gitlabrunner/config:/etc/gitlab-runner -v /var/run/docker.sock:/var/run/docker.sock gitlab/gitlab-runner:latest
+```
+
+Регистрация раннера (указываем url сервера gitlab и токен из `Settings -> CI/CD -> Pipelines -> Runners `):
+
+```
+sudo docker exec -it gitlab-runner gitlab-runner register \
+ --url http://178.154.223.64/ \
+ --non-interactive \
+ --locked=false \
+ --name DockerRunner \
+ --executor docker \
+ --docker-image alpine:latest \
+ --registration-token R1mGR3J-C8T74Xsa_FfZ \
+ --tag-list "linux,xenial,ubuntu,docker" \
+ --run-untagged
+```
+
+Если все успешно, то должен появится новый ранер в `Settings -> CI/CD -> Pipelines -> Runners ` секция `Available specific runners` и после появления ранера должен выполнится пайплайн.
+
+![Image 1](gitlab-ci/gitlab-ci-1.jpg)
+
+6. Добавление Reddit в проект
+
+```
+git clone https://github.com/express42/reddit.git && rm -rf ./reddit/.git
+git add reddit/
+git commit -m "Add reddit app"
+git push gitlab gitlab-ci-1
+```
+Измените описание пайплайна в `.gitlab-ci.yml`, создаем файл тестов `reddit/simpletest.rb`:
+
+```
+require_relative './app'
+require 'test/unit'
+require 'rack/test'
+
+set :environment, :test
+
+class MyAppTest < Test::Unit::TestCase
+  include Rack::Test::Methods
+
+  def app
+    Sinatra::Application
+  end
+
+  def test_get_request
+    get '/'
+    assert last_response.ok?
+  end
+end
+```
+
+Добавим библиотеку `rack-test` в `reddit/Gemfile`:
+
+```
+gem 'rack-test'
+```
+
+Запушим код в GitLab и убедимся, что test_unit_job гоняет тесты.
+![Image 2](gitlab-ci/gitlab-ci-2.jpg)
+
+
+7. Окружения
+
+Добавим в `.gitlab-ci.yml` новые окружения и условия запусков для ранеров 
+
+```
+image: ruby:2.4.2
+
+stages:
+  - build
+  - test
+  - review
+  - stage
+  - production
+
+variables:
+  DATABASE_URL: 'mongodb://mongo/user_posts'
+   
+before_script:
+  - cd reddit
+  - bundle install
+
+build_job:
+  stage: build
+  script:
+    - echo 'Building'
+
+test_unit_job:
+  stage: test
+  services:
+    - mongo:latest
+  script:
+    - ruby simpletest.rb
+
+test_integration_job:
+  stage: test
+  script:
+    - echo 'Testing 2'
+
+deploy_dev_job:
+  stage: review
+  script:
+    - echo 'Deploy'
+  environment:
+    name: dev
+    url: http://dev.example.com
+
+branch review:
+  stage: review
+  script: echo "Deploy to $CI_ENVIRONMENT_SLUG"
+  environment:
+    name: branch/$CI_COMMIT_REF_NAME
+    url: http://$CI_ENVIRONMENT_SLUG.example.com
+  only:
+    - branches
+  except:
+    - master
+
+staging:
+  stage: stage
+  when: manual
+  only:
+    - /^\d+\.\d+\.\d+/
+  script:
+    - echo 'Deploy'
+  environment:
+    name: stage
+    url: http://beta.example.com
+
+production:
+  stage: production
+  when: manual
+  only:
+    - /^\d+\.\d+\.\d+/
+  script:
+    - echo 'Deploy'
+  environment:
+    name: production
+    url: http://example.com
+
+```
+
+где:
+* `when: manual` - определяет ручной запуск
+* Директива `only` описывает условия, которые должны быть `истина`: регулярное выражение `/^\d+\.\d+\.\d+/` означает, что в git должен стоять тег из цифр разделенных точками (например 2.4.6). Изменения без указания тэга запустят пайплайн без задач staging и production.
+* `branch review:` на каждую ветку в git, отличную от master, Gitlab CI будет определять новое окружение.
+
+Для проверки закоммитим файлы с указанием тэга (версии) и запушим в gitlab:
+
+```
+git add .gitlab-ci.yml
+git commit -m '#5 add ver 2.4.10'
+git tag 2.4.10
+git push gitlab gitlab-ci-1 --tags
+```
+
+![Image 3](gitlab-ci/gitlab-ci-3.jpg)
+
+Stage и Production окружения запускаются вручную
+
+
+* Настройка оповещений в Slack
+
+Настроено на канале devops-team-otus.slack.com
+Channel ID: C024SKJK64V
+
+===================
+Удалим ресурсы:
+```
+sudo docker-compose down
+yc compute instance delete gitlab-host
+```
