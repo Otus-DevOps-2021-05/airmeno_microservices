@@ -1004,8 +1004,9 @@ Stage и Production окружения запускаются вручную
 Настроено на канале devops-team-otus.slack.com
 Channel ID: C024SKJK64V
 
-===================
-Удалим ресурсы:
+
+### Удалим ресурсы:
+
 ```
 sudo docker-compose down
 yc compute instance delete gitlab-host
