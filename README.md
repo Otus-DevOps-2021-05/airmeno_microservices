@@ -3,6 +3,8 @@ airmeno microservices repository
 
 ## Docker - 2 
 
+<details>
+  <summary>Решение</summary>
 Установка Docker на хост - https://docs.docker.com/engine/install/ubuntu/
 
 ```
@@ -113,7 +115,12 @@ Terraform генерирует на основе шаблона файл invento
 ansible-playbook playbooks/docker_run.yml
 ```
 
+</details>
+
 ## Docker - 3
+
+<details>
+  <summary>Решение</summary>
 
 Поднимаем ранее созданный docker host:
 
@@ -308,8 +315,12 @@ docker run -d --network=reddit -p 9292:9292 airmeno/ui:3.0
 docker-machine rm docker-host
 yc compute instance delete docker-host
 ```
+</details>
+
 ## Docker - 4
 
+<details>
+  <summary>Решение</summary>
 Поднимаем docker host:
 
 ```
@@ -676,6 +687,9 @@ docker-machine rm docker-host
 yc compute instance delete docker-host
 ```
 
+</details>
+
+
 ## Gitlab CI
 
 Создаем ветку в репозитории:
@@ -985,7 +999,7 @@ git push gitlab gitlab-ci-1 --tags
 Stage и Production окружения запускаются вручную
 
 
-* Настройка оповещений в Slack
+### Задания со ⭐: Настройка оповещений в Slack
 
 Настроено на канале devops-team-otus.slack.com
 Channel ID: C024SKJK64V
