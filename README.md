@@ -692,6 +692,8 @@ yc compute instance delete docker-host
 
 ## Gitlab CI
 
+<details>
+  <summary>Решение</summary>
 Создаем ветку в репозитории:
 
 ```
@@ -1010,4 +1012,420 @@ Channel ID: C024SKJK64V
 ```
 sudo docker-compose down
 yc compute instance delete gitlab-host
+```
+</details>
+
+## Системы мониторинга (Prometheus)
+
+### Подготовка окружения
+
+Создадим Docker хост и настроим локальное окружение:
+```
+yc compute instance create \
+  --name docker-host \
+  --memory=4 \
+  --zone ru-central1-a \
+  --network-interface subnet-name=default-ru-central1-a,nat-ip-version=ipv4 \
+  --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-1804-lts,size=15 \
+  --ssh-key ~/.ssh/appuser.pub
+
+	
+docker-machine create \
+  --driver generic \
+  --generic-ip-address=178.154.220.106 \
+  --generic-ssh-user yc-user \
+  --generic-ssh-key ~/.ssh/appuser \
+  docker-host
+```
+```
+docker-machine ls
+NAME          ACTIVE   DRIVER    STATE     URL                        SWARM   DOCKER     ERRORS
+docker-host   -        generic   Running   tcp://178.154.220.106:2376           v20.10.8   
+
+
+eval $(docker-machine env docker-host)
+```
+
+### Запуск Prometheus
+
+Воспользуемся готовым образом с DockerHub:
+
+```
+docker run --rm -p 9090:9090 -d --name prometheus prom/prometheus
+
+docker ps
+
+CONTAINER ID   IMAGE             COMMAND                  CREATED          STATUS          PORTS                                       NAMES
+e8854394c01d   prom/prometheus   "/bin/prometheus --c…"   15 seconds ago   Up 12 seconds   0.0.0.0:9090->9090/tcp, :::9090->9090/tcp   prometheus
+```
+
+Перейдем по адресу http://178.154.220.106:9090
+
+> узнать адрес докер хоста можно: `docker-machine ip docker-host`
+
+![Image 1](monitoring/mon-1.jpg)
+
+Интерфейс обновился, для перехода на старый интерфейс выбираем в меню **Clasic UI**.
+
+**Targets**
+
+Targets (цели) - представляют собой системы или процессы, за которыми следит Prometheus. Prometheus является pull системой, поэтому он постоянно делает HTTP запросы на имеющиеся у него адреса (endpoints). Посмотрим текущий список целей - **Status -> Targets**
+
+![Image 2](monitoring/mon-2.jpg)
+
+В Targest сейчас мы видимо только сам Prometheus. У каждой цели есть свой список адресов (endpoints), по которым следует обращаться для получения информации.
+
+### Структура директорий:
+
+* Создадим директорию docker в корне репозитория и перенесем в нее директорию `docker-monolith` и файлы `docker-compose.*` и все `.env`.
+* Создадим в корне репозитория директорию `monitoring`. В ней будет хранится все, что относится к мониторингу.
+
+Установим `docker-compose` на docker хосте:
+```
+docker-machine ssh docker-host
+sudo apt install docker-compose
+```
+
+### Мониторинг состояния микросервисов
+
+**Создание Docker образа Prometheus**
+
+```
+cat monitoring/prometheus/Dockerfile
+
+FROM prom/prometheus:v2.1.0
+ADD prometheus.yml /etc/prometheus/
+```
+
+Конфигурация Prometheus происходит через файлы конфигурации и опции командной строки. В `monitoring/prometheus` создаем файл `prometheus.yml`:
+
+```
+---
+global:
+  scrape_interval: '5s'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+        - 'localhost:9090'
+
+  - job_name: 'ui'
+    static_configs:
+      - targets:
+        - 'ui:9292'
+
+  - job_name: 'comment'
+    static_configs:
+      - targets:
+        - 'comment:9292'
+```
+
+В директории `prometheus` собираем Docker образ:
+
+```
+export USER_NAME=username
+docker build -t $USER_NAME/prometheus .
+```
+
+**Образы микросервисов**
+
+В коде микросервисов есть healthcheck-и для проверки работоспособности приложения. 
+
+Сборку образом теперь необходимо производить при помощи скриптов `docker_build.sh`, которые есть в директории каждого сервиса. С его помощью мы добавим информацию из Git в наш healthcheck.
+
+```
+/src/ui $ bash docker_build.sh
+/src/post-py $ bash docker_build.sh
+/src/comment $ bash docker_build.sh
+```
+Или из корня репозитория:
+
+```
+for i in ui post-py comment; do cd src/$i; bash docker_build.sh; cd -; done
+```
+
+Prometheus поднимаем совместно с микросервисами. В `docker/docker-compose.yml` опишем новый сервис:
+
+```
+services:
+
+...
+
+  prometheus:
+    image: ${USER_NAME}/prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - prometheus_data:/prometheus
+    command:
+    # Передаем доп параметры вкомандной строке
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=1d' # Задаем время хранения метрик в 1 день
+    networks:
+      - front_net
+      - back_net 
+...
+  
+  volumes:
+    prometheus_data:
+```
+
+Изменим `build` образов наших микросервисом на уже подготовленные образы через скрипт `docker_build.sh`:
+
+```
+  #build: ./ui
+  #image: ${USERNAME}/ui:${UI_TAG}
+    
+  image: ${USER_NAME}/ui
+```
+
+Поднимаем сервисы. Поскольку в предыдущих заданиях был использован `docker-compose.override.yml`, то игнорируем его при запуске:
+
+```
+docker-compose -f docker-compose.yml up -d
+```
+Убедимся, что сервисы (контейнеры) поднялись:
+
+```
+docker-compose ps
+
+       Name                      Command               State                    Ports                  
+-------------------------------------------------------------------------------------------------------
+docker_comment_1      puma                             Up                                              
+docker_post_1         python3 post_app.py              Up                                              
+docker_post_db_1      docker-entrypoint.sh mongod      Up      27017/tcp                               
+docker_prometheus_1   /bin/prometheus --config.f ...   Up      0.0.0.0:9090->9090/tcp,:::9090->9090/tcp
+docker_ui_1           puma                             Up      0.0.0.0:9292->9292/tcp,:::9292->9292/tcp
+```
+
+### Exporters
+
+Экспортер похож на вспомогательного агента для сбора метрик. 
+
+В ситуациях, когда мы не можем реализовать отдачу метрик Prometheus в коде приложения, мы можем использовать экспортер, который будет транслировать метрики приложения или системы в формате доступном для чтения Prometheus.
+
+Для сбора информации о работе Docker хоста и представления этой информации в Prometheus воспользуемся `Node exporter`.
+
+Определим ещё один сервиc в `docker/docker-compose.yml`:
+
+```
+node-exporter:
+  image: prom/node-exporter:v0.15.2
+  user: root
+  volumes:
+    - /proc:/host/proc:ro
+    - /sys:/host/sys:ro
+    - /:/rootfs:ro
+  command:
+    - '--path.procfs=/host/proc'
+    - '--path.sysfs=/host/sys'
+    - '--collector.filesystem.ignored-mount-points="^/(sys|proc|dev|host|etc)($$|/)"'  
+  networks:
+    - front_net
+    - back_net  
+
+```
+
+И в `monitoring/prometheus/prometheus.yml` добавим job для `node exporter`:
+
+```
+- job_name: 'node'
+  static_configs: 
+    - targets: 
+      - 'node-exporter:9100'
+```
+
+Соберем новый Docker образ для Prometheus:
+
+```
+cd monitoring/prometheus 
+
+docker build -t $USER_NAME/prometheus .
+```
+
+Пересоздадим сервисы:
+
+```
+cd ../../docker/
+docker-compose down
+docker-compose -f docker-compose.yml up -d
+```
+
+Убедимся, что список endpoint-ов Prometheus появился ещё один endpoint - `node`.
+
+![Image 3](monitoring/mon-3.jpg)
+
+Добавим нагрузки на Docker Host и проверм:
+
+```
+docker-machine ssh docker-host
+
+yes > /dev/null
+```
+
+![Image 4](monitoring/mon-4.jpg)
+
+### Обазы в DockerHub
+
+```
+docker login
+Login Succeeded
+
+
+docker push $USER_NAME/ui
+docker push $USER_NAME/comment
+docker push $USER_NAME/post
+docker push $USER_NAME/prometheus
+```
+
+Ссылка на DockerHub: https://hub.docker.com/u/airmeno
+
+### Задания со ⭐
+
+**MongoDB Exporter**
+
+Соберем Docker образ нашего `mongodb_exporter` через `monitoring/mongodb-exporter/Dockerfile` из https://github.com/percona/mongodb_exporter:
+
+```
+FROM alpine:3.14
+
+WORKDIR /tmp/mongodb
+RUN wget https://github.com/percona/mongodb_exporter/releases/download/v0.20.7/mongodb_exporter-0.20.7.linux-amd64.tar.gz && \
+    tar xvzf mongodb_exporter-0.20.7.linux-amd64.tar.gz && \
+    cp mongodb_exporter /usr/local/bin/. && \
+    rm -rf /tmp/mongodb
+
+WORKDIR /
+
+EXPOSE 9216
+
+CMD ["mongodb_exporter"]
+```
+
+> https://dock.co.nz/post/build-mongodb-exporter-for-prometheus/
+
+Далее добавим наш экпортер в `monitoring/prometheus/prometheus.yml`:
+
+```
+  - job_name: 'mongodb'
+    static_configs:
+      - targets:
+        - 'mongodb-exporter:9216'
+```
+
+и `docker/docker-compose.yml`:
+
+```
+  mongodb-exporter:
+    image: ${USER_NAME}/mongodb-exporter
+    environment:
+      MONGODB_URI: mongodb://post_db:27017    
+    networks:
+      - back_net
+```
+
+Соберем заново наши образы и контейнеры:
+
+```
+cd monitoring/mongodb-exporter
+docker build -t $USER_NAME/mongodb-exporter .
+
+cd monitoring/prometheus 
+docker build -t $USER_NAME/prometheus .
+
+cd ../../docker/
+docker-compose down
+docker-compose -f docker-compose.yml up -d
+```
+![Image 5](monitoring/mon-5.jpg)
+
+**Blackbox Exporter**
+
+Blackbox exporter позволяет реализовать для Prometheus мониторинг по принципу черного ящика. Т.е., например, мы можем проверить отвечает ли сервис по http или принимает ли соединения порт. 
+
+
+Соберем Docker образ нашего `blackbox_exporter` из https://github.com/prometheus/blackbox_exporter:
+
+```
+FROM prom/blackbox-exporter
+COPY blackbox.yml /etc/blackboxexporter/config.yml
+```
+
+Формируем `blackbox.yml`:
+
+```
+modules:
+  http_2xx:
+    http:
+      no_follow_redirects: false
+      preferred_ip_protocol: ip4
+      valid_http_versions:
+      - HTTP/1.1
+      - HTTP/2
+      valid_status_codes: []
+    prober: http
+    timeout: 5s
+```
+
+> https://habr.com/ru/company/otus/blog/500448/
+
+Добавим в Prometheus мониторинг сервисов comment, post, ui с помощью Blackbox exporter - https://github.com/prometheus/blackbox_exporter.
+
+```
+  blackbox-exporter:
+    image: ${USER_NAME}/blackbox-exporter
+    command:
+      - '--config.file=/etc/blackboxexporter/config.yml'
+    networks:
+      - back_net
+      - front_net  
+```
+
+Добавим job в `monitoring/prometheus/prometheus.yml`:
+
+```
+  - job_name: 'blackbox'
+    scrape_interval: 5s
+    metrics_path: /probe
+    params:
+      module: [ http_2xx ]
+    static_configs:
+      - targets:
+          - http://ui:9292
+          - http://comment:9292/healthcheck
+          - http://post:5000/healthcheck
+    relabel_configs:
+      - source_labels: [ __address__ ]
+        target_label: __param_target
+      - source_labels: [ __param_target ]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+```
+
+И еще раз пересоберем наши образы и контейнеры:
+
+```
+cd monitoring/blackbox-exporter 
+docker build -t $USER_NAME/blackbox-exporter .
+
+cd monitoring/prometheus 
+docker build -t $USER_NAME/prometheus .
+
+cd ../../docker/
+docker-compose down
+docker-compose -f docker-compose.yml up -d
+```
+![Image 6](monitoring/mon-6.jpg)
+
+![Image 7](monitoring/mon-7.jpg)
+
+
+### Удалим ресурсы:
+
+```
+docker-compose down
+yc compute instance delete docker-host
 ```

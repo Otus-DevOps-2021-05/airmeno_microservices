@@ -1,0 +1,92 @@
+version: '3.3'
+services:
+
+  prometheus:
+    image: ${USER_NAME}/prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - prometheus_data:/prometheus
+    command:
+    # Передаем доп параметры в командной строке
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=1d' # Задаем время хранения метрик в 1 день
+    networks:
+      - front_net
+      - back_net    
+
+  node-exporter:
+    image: prom/node-exporter:v0.15.2
+    user: root
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points="^/(sys|proc|dev|host|etc)($$|/)"'  
+    networks:
+      - front_net
+      - back_net  
+
+  mongodb-exporter:
+    image: ${USER_NAME}/mongodb-exporter
+    environment:
+      MONGODB_URI: mongodb://post_db:27017    
+    networks:
+      - back_net
+
+  blackbox-exporter:
+    image: ${USER_NAME}/blackbox-exporter
+    ports:
+      - 9115:9115
+    command:
+      - '--config.file=/etc/blackboxexporter/config.yml'
+    networks:
+      - back_net
+      - front_net    
+      
+  post_db:
+    image: mongo:${MONGO_VERSION}
+    volumes:
+      - post_db:/data/db
+    networks:
+      back_net:
+        aliases:
+          - post_db
+          - comment_db
+
+  ui:
+    #build: ./ui
+    #image: ${USERNAME}/ui:${UI_TAG}
+    image: ${USER_NAME}/ui
+    ports:
+      - ${UI_HOST_PORT}:${UI_CONTAINER_PORT}/tcp
+    networks:
+      - front_net
+
+  post:
+    #build: ./post-py
+    #image: ${USERNAME}/post:${POST_TAG}
+    image: ${USER_NAME}/post
+    networks:
+      - front_net
+      - back_net
+
+  comment:
+    #build: ./comment
+    #image: ${USERNAME}/comment:${COMMENT_TAG}
+    image: ${USER_NAME}/comment
+    networks:
+      - front_net
+      - back_net
+
+volumes:
+  post_db:
+  prometheus_data:
+
+networks:
+  back_net:
+  front_net:
