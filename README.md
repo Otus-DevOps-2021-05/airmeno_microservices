@@ -1017,6 +1017,8 @@ yc compute instance delete gitlab-host
 
 ## Системы мониторинга (Prometheus)
 
+<details>
+  <summary>Решение</summary>
 ### Подготовка окружения
 
 Создадим Docker хост и настроим локальное окружение:
@@ -1428,4 +1430,373 @@ docker-compose -f docker-compose.yml up -d
 ```
 docker-compose down
 yc compute instance delete docker-host
+```
+</details>
+
+## Логирование и распределенная трассировка
+
+### Подготовка окружения
+
+Создадим Docker хост и настроим локальное окружение:
+
+```
+yc compute instance create \
+  --name logging \
+  --memory=4 \
+  --zone ru-central1-a \
+  --network-interface subnet-name=default-ru-central1-a,nat-ip-version=ipv4 \
+  --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-1804-lts,size=15 \
+  --ssh-key ~/.ssh/appuser.pub
+
+docker-machine create \
+  --driver generic \
+  --generic-ip-address=178.154.203.174 \
+  --generic-ssh-user yc-user \
+  --generic-ssh-key ~/.ssh/appuser \
+  logging
+```
+
+```
+docker-machine ls
+
+NAME      ACTIVE   DRIVER    STATE     URL                          SWARM   DOCKER     ERRORS
+logging   -        generic   Running   tcp://178.154.203.174:2376           v20.10.8 
+```
+
+Установим docker-compose на docker хосте:
+
+```
+docker-machine ssh logging
+sudo apt install docker-compose
+```
+
+```
+eval $(docker-machine env logging)
+```
+
+Сборка новых образов:
+
+```
+export USER_NAME='username'
+
+cd ./src/ui && bash docker_build.sh && docker push $USER_NAME/ui:logging
+cd ../post-py && bash docker_build.sh && docker push $USER_NAME/post:logging
+cd ../comment && bash docker_build.sh && docker push $USER_NAME/comment:logging
+```
+
+### Elastic Stack
+
+Система централизованного логирования на примере Elastic-стека (ранее известного как ELK), который включает в себя 3 основных компонента:
+* ElasticSearch (TSDB и поисковый движок для хранения данных)
+* Logstash (для аггрегации и трансформации данных)
+* Kibana (для визуализации)
+
+Для аггрегации логов вместо Logstash будем использовать Fluentd, получим еще одно популярное сочетание этих инструментов - EFK.
+
+Fluentd - инструмент, который может использоваться для отправки, аггрегации и преобразования лог-сообщений. Fluentd будем использовать для аггрегации (сбора в одном месте) и парсинга логов сервисов нашего приложения.
+
+В директории `logging/fluentd` создаем Dockerfile:
+
+```
+FROM fluent/fluentd:v0.12
+RUN gem install fluent-plugin-elasticsearch --no-rdoc --no-ri --version 1.9.5
+RUN gem install fluent-plugin-grok-parser --no-rdoc --no-ri --version 1.0.0
+ADD fluent.conf /fluentd/etc
+```
+и файл конфигурации `logging/fluentd/fluent.conf`:
+
+```
+<source>
+  @type forward
+  port 24224
+  bind 0.0.0.0
+</source>
+
+<match *.**>
+  @type copy
+  <store>
+    @type elasticsearch
+    host elasticsearch
+    port 9200
+    logstash_format true
+    logstash_prefix fluentd
+    logstash_dateformat %Y%m%d
+    include_tag_key true
+    type_name access_log
+    tag_key @log_name
+    flush_interval 1s
+  </store>
+  <store>
+    @type stdout
+  </store>
+</match>
+```
+
+Соберем docker image для fluentd:
+
+```
+cd logging/fluentd
+docker build -t $USER_NAME/fluentd .
+```
+
+### Структурированные логи
+
+Логи должны иметь заданную (единую) структуру и содержать необходимую для нормальной эксплуатации данного сервиса информацию о его работе.
+
+Лог-сообщения также должны иметь понятный для выбранной системы логирования формат, чтобы избежать ненужной траты ресурсов на преобразование данных в нужный вид.
+
+
+Для запуска подготовленных контейнеров настроим `docker/docker-compose.yml` на теги `:logging` и запустим сервисы:
+
+```
+cd docker && docker-compose -f docker-compose.yml up -d
+```
+
+Можем посмотреть логи, например для `post` сервиса:
+
+```
+docker-compose logs -f post
+
+Attaching to docker_post_1
+post_1     | {"addr": "172.19.0.2", "event": "request", "level": "info", "method": "GET", "path": "/healthcheck?", "request_id": null, "response_status": 200, "service": "post", "timestamp": "2021-09-10 18:10:38"}
+post_1     | {"addr": "172.19.0.2", "event": "request", "level": "info", "method": "GET", "path": "/healthcheck?", "request_id": null, "response_status": 200, "service": "post", "timestamp": "2021-09-10 18:10:43"}
+post_1     | {"addr": "172.19.0.2", "event": "request", "level": "info", "method": "GET", "path": "/healthcheck?", "request_id": null, "response_status": 200, "service": "post", "timestamp": "2021-09-10 18:10:48"}
+post_1     | {"addr": "172.19.0.2", "event": "request", "level": "info", "method": "GET", "path": "/healthcheck?", "request_id": null, "response_status": 200, "service": "post", "timestamp": "2021-09-10 18:10:53"}
+```
+
+Каждое событие, связанное с работой нашего приложения логируется в JSON-формате и имеет нужную нам структуру: тип события (event), сообщение (message), переданные функции параметры (params), имя сервиса (service) и др.
+
+По умолчанию Docker-контейнерами используется json-file драйвер для логирования информации, которая пишется сервисом внутри контейнера в stdout (и stderr). 
+
+Для отправки логов во Fluentd используем docker-драйвер fluentd.
+
+> https://docs.docker.com/config/containers/logging/fluentd/
+
+Для сервиса post определим драйвер для логирования - `docker/docker-compose.yml`:
+
+```
+  post:
+    image: ${USER_NAME}/post:logging
+    environment:
+      - POST_DATABASE_HOST=post_db
+      - POST_DATABASE=posts
+    depends_on:
+      - post_db
+    ports:
+      - "5000:5000"
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: service.post
+```
+
+### Запуск системы логирования
+
+Поднимите инфраструктуру централизованной системы логирования и перезапустим сервисы приложения:
+
+```
+docker-compose -f docker-compose-logging.yml up -d
+docker-compose down
+docker-compose -f docker-compose.yml up -d
+```
+
+### Добавление фильтра во Fluentd для сервиса post
+
+Добавьте фильтр для парсинга json-логов, приходящих от сервиса post, в `logging/fluentd/fluent.conf`:
+
+```
+<source>
+ @type forward
+ port 24224
+ bind 0.0.0.0
+</source>
+
+<filter service.post>
+ @type parser
+ format json
+ key_name log
+</filter>
+
+<match *.**>
+ @type copy
+
+...
+
+```
+
+Пересоберем образ и перезапустим сервис Fluentd:
+
+```
+logging/fluentd $ docker build -t $USER_NAME/fluentd .
+docker $ docker-compose -f docker-compose-logging.yml up -d fluentd
+```
+
+### Неструктурированные логи
+
+Неструктурированные логи отличаются отсутствием четкой структуры данных. Также часто бывает, что формат лог-сообщений не подстроен под систему централизованного логирования, что существенно увеличивает затраты вычислительных и временных ресурсов на обработку данных и выделение нужной информации.
+
+На примере сервиса ui рассмотрим пример логов с неудобным форматом сообщений. Настроим отправку логов во Fluentd для сервиса ui - `docker/docker-compose.yml`:
+
+```
+ui:
+...
+ logging:
+ driver: "fluentd"
+ options:
+ fluentd-address: localhost:24224
+ tag: service.ui
+...
+```
+
+Перезапустим ui:
+
+```
+docker $ docker-compose stop ui
+docker $ docker-compose rm ui
+docker $ docker-compose -f docker-compose.yml up -d 
+```
+
+В Kibana применим запрос `container_name : *ui*` и  убедимся, что общая структура у поля log в сообщениях от этого сервиса отсутствует:
+
+```
+?log	I, [2021-09-10T19:00:02.885721 #1]  INFO -- : service=ui | event=show_all_posts | request_id=8fe05d40-5ab2-4fd2-b7ab-a735ca9874d6 | message='Successfully showed the home page with posts' | params: "{}"
+```
+
+Для их парсинга неструктурированных логов в `/docker/fluentd/fluent.conf` добавим регулярное выражение:
+
+```
+<filter service.ui>
+  @type parser
+  format /\[(?<time>[^\]]*)\]  (?<level>\S+) (?<user>\S+)[\W]*service=(?<service>\S+)[\W]*event=(?<event>\S+)[\W]*(?:path=(?<path>\S+)[\W]*)?request_id=(?<request_id>\S+)[\W]*(?:remote_addr=(?<remote_addr>\S+)[\W]*)?(?:method= (?<method>\S+)[\W]*)?(?:response_status=(?<response_status>\S+)[\W]*)?(?:message='(?<message>[^\']*)[\W]*)?/
+  key_name log
+</filter>
+```
+
+Пересоберем образ и перезапустим сервис Fluentd:
+
+```
+logging/fluentd $ docker build -t $USER_NAME/fluentd .
+docker $ docker-compose -f docker-compose-logging.yml up -d fluentd
+```
+
+В Kibana применим запрос `@log_name: service.ui` и проверим что лог теперь распарсен:
+
+```
+t message	Successfully showed the home page with posts
+```
+
+### Grok-шаблоны
+
+Созданные регулярки могут иметь ошибки, их сложно менять и ещё сложнее - читать без применения инструментов навроде. Для облегчения задачи парсинга вместо
+стандартных регулярок можно использовать grok-шаблоны. По-сути grok'и - это именованные шаблоны регулярных выражений (очень похоже на функции). Можно использовать готовый regexp, просто сославшись на него как на функцию.
+
+Поменяем в `/docker/fluentd/fluent.conf` решулярку на:
+
+```
+<filter service.ui>
+ @type parser
+ format grok
+ grok_pattern %{RUBY_LOGGER}
+ key_name log
+</filter>
+```
+
+и пересоберем и перезапустим сервис:
+
+```
+logging/fluentd $ docker build -t $USER_NAME/fluentd .
+docker $ docker-compose -f docker-compose-logging.yml up -d fluentd
+```
+
+в Kibana теперь лог выглядит так:
+
+```
+t message	  service=ui | event=show_all_posts | request_id=8369cd1c-1aa0-4c83-a4c6-2cfba9485bca | message='Successfully showed the home page with posts' | params: "{}"
+```
+
+Часть логов нужно еще дораспарсить. Для этого используем несколько grok'ов по очереди:
+
+```
+<filter service.ui>
+  @type parser
+  format grok
+  grok_pattern service=%{WORD:service} \| event=%{WORD:event} \| request_id=%{GREEDYDATA:request_id} \| message='%{GREEDYDATA:message}'
+  key_name message
+  reserve_data true
+</filter>
+```
+
+⭐ Ещё один формат лога остался неразобранным:
+
+```
+tmessage	service=ui | event=request | path=/post/613ba6ad725f03000c390e74 | request_id=21379923-e3b7-43b8-816d-a7d4309eeab7 | remote_addr=109.252.184.115 | method= GET | response_status=200
+```
+
+Составим еще один grok-шаблоны для данного типа сообщений по аналогии с предыдущим:
+
+```
+<filter service.ui>
+  @type parser
+  format grok
+  grok_pattern service=%{WORD:service} \| event=%{WORD:event} \| path=%{GREEDYDATA:request_id} \| request_id=%{GREEDYDATA:request_id} \| remote_addr=%{IP:remote_addr} \| method= %{WORD:method} \| response_status=%{INT:response_status}
+  key_name message
+  reserve_data true
+</filter>
+```
+
+и пересоберем и перезапустим сервис:
+
+```
+logging/fluentd $ docker build -t $USER_NAME/fluentd .
+docker $ docker-compose -f docker-compose-logging.yml up -d fluentd
+```
+
+### Распределенный трейсинг
+
+Добавим в `docker/docker-compose-logging.yml` для сервисов логирования сервис распределенного трейсинга Zipkin:
+
+```
+services:
+  zipkin:
+    image: openzipkin/zipkin:2.21.0
+    ports:
+      - "9411:9411"
+...
+```
+
+Добавим для каждого сервиса в `docker/docker-compose.yml` для приложении reddit параметр `ZIPKIN_ENABLED`:
+
+```
+environment:
+- ZIPKIN_ENABLED=${ZIPKIN_ENABLED}
+```
+
+В .env-файле:
+
+```
+ZIPKIN_ENABLED=true
+```
+
+```
+docker-compose -f docker-compose.yml up -d
+```
+
+Zipkin должен быть в одной сети с приложениями, поэтому подключим их к нашим сетям `back_net:` и `front_net:`.
+
+Поднимем изменённую систему логирования:
+
+```
+docker-compose -f docker-compose-logging.yml -f docker-compose.yml down
+docker-compose -f docker-compose-logging.yml -f docker-compose.yml up -d
+```
+
+Web-интерфейс Zipkin на порту 9411.
+
+### Удалим ресурсы:
+
+```
+sudo docker-compose down
+docker-machine rm logging
+yc compute instance delete logging
 ```
