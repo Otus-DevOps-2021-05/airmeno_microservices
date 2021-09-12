@@ -1593,7 +1593,7 @@ post_1     | {"addr": "172.19.0.2", "event": "request", "level": "info", "method
 
 ### Запуск системы логирования
 
-Поднимите инфраструктуру централизованной системы логирования и перезапустим сервисы приложения:
+Поднимем инфраструктуру централизованной системы логирования и перезапустим сервисы приложения:
 
 ```
 docker-compose -f docker-compose-logging.yml up -d
@@ -1603,7 +1603,7 @@ docker-compose -f docker-compose.yml up -d
 
 ### Добавление фильтра во Fluentd для сервиса post
 
-Добавьте фильтр для парсинга json-логов, приходящих от сервиса post, в `logging/fluentd/fluent.conf`:
+Добавим фильтр для парсинга json-логов, приходящих от сервиса post, в `logging/fluentd/fluent.conf`:
 
 ```
 <source>
@@ -1686,6 +1686,8 @@ docker $ docker-compose -f docker-compose-logging.yml up -d fluentd
 t message	Successfully showed the home page with posts
 ```
 
+> Kibana слушает на порту 5601.
+
 ### Grok-шаблоны
 
 Созданные регулярки могут иметь ошибки, их сложно менять и ещё сложнее - читать без применения инструментов навроде. Для облегчения задачи парсинга вместо
@@ -1730,7 +1732,7 @@ t message	  service=ui | event=show_all_posts | request_id=8369cd1c-1aa0-4c83-a4
 ⭐ Ещё один формат лога остался неразобранным:
 
 ```
-tmessage	service=ui | event=request | path=/post/613ba6ad725f03000c390e74 | request_id=21379923-e3b7-43b8-816d-a7d4309eeab7 | remote_addr=109.252.184.115 | method= GET | response_status=200
+t message	service=ui | event=request | path=/post/613ba6ad725f03000c390e74 | request_id=21379923-e3b7-43b8-816d-a7d4309eeab7 | remote_addr=109.252.184.115 | method= GET | response_status=200
 ```
 
 Составим еще один grok-шаблоны для данного типа сообщений по аналогии с предыдущим:
@@ -1791,12 +1793,46 @@ docker-compose -f docker-compose-logging.yml -f docker-compose.yml down
 docker-compose -f docker-compose-logging.yml -f docker-compose.yml up -d
 ```
 
-Web-интерфейс Zipkin на порту 9411.
+> Web-интерфейс Zipkin на порту 9411.
 
 ### Удалим ресурсы:
 
 ```
-sudo docker-compose down
+docker-compose down
 docker-machine rm logging
 yc compute instance delete logging
 ```
+
+
+### Траблшутинг UI-экспириенса ⭐ 
+
+Соберем образы со сломанным кодом и пересоберем инфраструктуру. 
+
+Протестируем. Действительно все функицонирует нормельно, кроме открытия существующих сообщений: открываются долго.
+
+В Zipkin наблюдаем щадержки спана `UI_APP -> POST -> get` более 3-х сек. В коде контейнера `post-py` в `post_app.py`:
+
+```
+# Retrieve information about a post
+@zipkin_span(service_name='post', span_name='db_find_single_post')
+def find_post(id):
+    start_time = time.time()
+    try:
+        post = app.db.find_one({'_id': ObjectId(id)})
+    except Exception as e:
+        log_event('error', 'post_find',
+                  "Failed to find the post. Reason: {}".format(str(e)),
+                  request.values)
+        abort(500)
+    else:
+        stop_time = time.time()  # + 0.3
+        resp_time = stop_time - start_time
+        app.post_read_db_seconds.observe(resp_time)
+        time.sleep(3)
+        log_event('info', 'post_find',
+                  'Successfully found the post information',
+                  {'post_id': id})
+        return dumps(post)
+```
+
+строчка `time.sleep(3)` создает задержку в 3 сек. 
