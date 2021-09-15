@@ -1904,6 +1904,7 @@ apt-cache madison docker-ce
 ```
 
 > https://docs.docker.com/engine/install/ubuntu/
+
 > https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
 
 Поднимем кластер k8s с помощью kubeadm:
