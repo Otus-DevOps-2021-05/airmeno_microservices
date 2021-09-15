@@ -1981,3 +1981,24 @@ kubectl get pods
 NAME                             READY   STATUS    RESTARTS   AGE
 ui-deployment-74c48ffc56-95xch   1/1     Running   0          24s
 ```
+
+### Установка кластера k8s с помощью terraform и ansible ⭐⭐ 
+
+В директории `kubernetes` созданы директории `terraform` и `ansible`. В данных директориях созданы манифесты.
+
+Terraform динамически создает необходимое количество нод, первая нода описывается как мастер, в случае необходимости можно определить количество мастер нод через `inventory.tpl`. Ansible с помощью ролей разворачивает Kubernetes кластер. 
+
+Версии k8s и docker зафиксированы через переменные на 1.19 и 19.03 соответсвенно.
+
+> https://kubernetes.io/blog/2019/03/15/kubernetes-setup-using-ansible-and-vagrant/
+
+
+В Terraform настроен `provisioner` для автоматического разворачивания кластера через ansible-playbook.
+
+```
+$ kubectl get nodes
+
+NAME                   STATUS   ROLES    AGE    VERSION
+fhmnc0euis9a2s93q8vh   Ready    <none>   44s    v1.19.14
+fhmsb1mbihf08h0bv9re   Ready    master   4m1s   v1.19.14
+```
