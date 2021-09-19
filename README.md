@@ -2091,7 +2091,7 @@ minikube service ui
 
 ```
 
-[pict-1](kubernetes/img/kub2-1.jpg)
+![pict-1](kubernetes/img/kub2-1.jpg)
 
 **Dashboard**
 
@@ -2201,7 +2201,7 @@ Type: NodePort
 NodePort: <unset> 31945/TCP
 ```
 
-[pict-2](kubernetes/img/kub2-2.jpg)
+![pict-2](kubernetes/img/kub2-2.jpg)
 
 
 ### Разверните Kubernetes-кластер в Yandex cloud с помощью Terraform ⭐
