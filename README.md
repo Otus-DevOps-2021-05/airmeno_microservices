@@ -1019,6 +1019,7 @@ yc compute instance delete gitlab-host
 
 <details>
   <summary>Решение</summary>
+
 ### Подготовка окружения
 
 Создадим Docker хост и настроим локальное окружение:
@@ -1435,6 +1436,9 @@ yc compute instance delete docker-host
 
 ## Логирование и распределенная трассировка
 
+<details>
+  <summary>Решение</summary>
+
 ### Подготовка окружения
 
 Создадим Docker хост и настроим локальное окружение:
@@ -1836,3 +1840,165 @@ def find_post(id):
 ```
 
 строчка `time.sleep(3)` создает задержку в 3 сек. 
+
+</details>
+
+## Kubernetes 1 (Введение в kubernetes)
+
+### Создание примитивов
+
+Создаем файл в `kubernetes/reddit/post-deployment.yml`:
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: post
+  template:
+    metadata:
+      name: post
+      labels:
+        app: post
+    spec:
+      containers:
+      - image: airmeno/post
+        name: post
+```
+
+Аналогично в той же директории создаем:
+* ui-deployment.yml
+* comment-deployment.yml
+* mongo-deployment.yml
+
+
+### Установка k8s при помощи утилиты kubeadm (the_hard_way)
+
+Создаем 2 ноды (ВМ) на Ubuntu 18, устанавливаем: docker v=19.03 и kube* v=1.19:
+
+```
+sudo apt-get update
+sudo apt-get install apt-transport-https ca-certificates curl gnupg lsb-release
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list 
+
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io kubelet kubeadm kubectl
+
+sudo apt-get install docker-ce=5:19.03.15~3-0~ubuntu-focal docker-ce-cli=5:19.03.15~3-0~ubuntu-focal containerd.io kubelet=1.19.14-00 kubeadm=1.19.14-00 kubectl=1.19.14-00
+```
+
+Узнать доступные версии пакетов:
+```
+apt-cache madison docker-ce
+```
+
+> https://docs.docker.com/engine/install/ubuntu/
+
+> https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
+
+Поднимем кластер k8s с помощью kubeadm:
+
+```
+kubeadm init --apiserver-cert-extra-sans=178.154.240.189 --apiserver-advertise-address=0.0.0.0 --control-plane-endpoint=178.154.240.189 --pod-network-cidr=10.244.0.0/16
+```
+
+Послу успешной установки получим пример команды для добавления worker ноды в кластер:
+
+```
+sudo kubeadm join 178.154.240.189:6443 --token ujd6g5.oidc0y6b7brcztnh \
+    --discovery-token-ca-cert-hash sha256:f673a31834cec6ef588ac1c70393d7b8ec8f92392bc865d5fa89cee0d32e02fd
+```
+
+Создадим конфиг файл для пользователя на мастер ноде:
+
+```
+mkdir $HOME/.kube/
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $USER $HOME/.kube/config
+```
+
+Посмотрим наши ноды:
+
+```
+kubectl get nodes
+
+NAME     STATUS     ROLES    AGE     VERSION
+master   NotReady   master   5m38s   v1.19.14
+worker   NotReady   <none>   4m34s   v1.19.14
+```
+ноды находятся в статусе NotReady, посмотрим состояние ноды:
+
+```
+kubectl describe node worker
+
+...
+
+NetworkReady=false reason:NetworkPluginNotReady message:docker: network plugin is not ready: cni config uninitialized
+Addresses:
+
+...
+```
+Не установлен сетевой плагин. Установим:
+
+```
+curl https://docs.projectcalico.org/manifests/calico.yaml -O
+
+раскомментируем переменную CALICO_IPV4POOL_CIDR в манифесте и установить для нее то же значение, что и в команде init: 10.244.0.0/16
+
+kubectl apply -f calico.yaml
+```
+
+> https://docs.projectcalico.org/getting-started/kubernetes/self-managed-onprem/onpremises
+
+и еще раз проверим состояние нод:
+
+```
+kubectl get nodes
+
+NAME     STATUS   ROLES    AGE   VERSION
+master   Ready    master   21m   v1.19.14
+worker   Ready    <none>   20m   v1.19.14
+```
+
+Запустим один из манифестов нашего приложения и убедимся, что он применяется:
+
+```
+kubectl apply -f ui-deployment.yml
+
+kubectl get pods
+
+NAME                             READY   STATUS    RESTARTS   AGE
+ui-deployment-74c48ffc56-95xch   1/1     Running   0          24s
+```
+
+### Установка кластера k8s с помощью terraform и ansible ⭐⭐ 
+
+В директории `kubernetes` созданы директории `terraform` и `ansible`. В данных директориях созданы манифесты.
+
+Terraform динамически создает необходимое количество нод, первая нода описывается как мастер, в случае необходимости можно определить количество мастер нод через `inventory.tpl`. Ansible с помощью ролей разворачивает Kubernetes кластер. 
+
+Версии k8s и docker зафиксированы через переменные на 1.19 и 19.03 соответсвенно.
+
+> https://kubernetes.io/blog/2019/03/15/kubernetes-setup-using-ansible-and-vagrant/
+
+
+В Terraform настроен `provisioner` для автоматического разворачивания кластера через ansible-playbook.
+
+```
+$ kubectl get nodes
+
+NAME                   STATUS   ROLES    AGE    VERSION
+fhmnc0euis9a2s93q8vh   Ready    <none>   44s    v1.19.14
+fhmsb1mbihf08h0bv9re   Ready    master   4m1s   v1.19.14
+```
