@@ -2202,3 +2202,36 @@ NodePort: <unset> 31945/TCP
 ```
 
 [pict-2](kubernetes/img/kub2-2.jpg)
+
+
+### Разверните Kubernetes-кластер в Yandex cloud с помощью Terraform ⭐
+
+Настройки Terraform для развертывания K8S на Yandex Сloud находятся `kubernetes\terraform-k8s`. 
+
+```
+terraform init
+
+terraform aplly
+```
+
+> https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs/data-sources/datasource_kubernetes_cluster
+
+
+Проверим результат:
+
+```
+kubectl config current-context
+yc-k8s-dev
+```
+
+### YAML-манифесты для описания созданных сущностей для включения dashboard  ⭐
+
+> https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/
+
+> https://8gwifi.org/docs/kube-dash.jsp
+
+> https://www.liquidweb.com/kb/how-to-install-and-configure-the-kubernetes-dashboard/
+
+```
+curl https://raw.githubusercontent.com/kubernetes/dashboard/v2.3.1/aio/deploy/recommended.yaml -o dashboard.yml
+```
