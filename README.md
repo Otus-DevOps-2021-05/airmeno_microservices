@@ -1845,6 +1845,9 @@ def find_post(id):
 
 ## Kubernetes 1 (Введение в kubernetes)
 
+<details>
+  <summary>Решение</summary>
+
 ### Создание примитивов
 
 Создаем файл в `kubernetes/reddit/post-deployment.yml`:
@@ -2002,3 +2005,200 @@ NAME                   STATUS   ROLES    AGE    VERSION
 fhmnc0euis9a2s93q8vh   Ready    <none>   44s    v1.19.14
 fhmsb1mbihf08h0bv9re   Ready    master   4m1s   v1.19.14
 ```
+
+</details>
+
+## Kubernetes 2 (Запуск кластера и приложения. Модель безопасности)
+
+### Разворачиваем Kubernetes локально
+
+```
+sudo apt-get update
+sudo apt-get install -y apt-transport-https ca-certificates curl
+
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+sudo apt-get update
+sudo apt-get install -y kubectl
+```
+
+```
+kubectl cluster-info
+```
+
+**Установка Minikube**
+
+```
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube_latest_amd64.deb
+sudo dpkg -i minikube_latest_amd64.deb
+```
+
+Запустим Minikube-кластер (весрия 1.19.7):
+
+```
+minikube start --kubernetes-version 1.19.7
+```
+
+Minikube-кластер развернут. При этом автоматически был настроен конфиг kubectl.
+
+```
+kubectl get nodes
+
+NAME       STATUS   ROLES    AGE   VERSION
+minikube   Ready    master   38s   v1.19.7
+```
+
+**Запуск приложения**
+
+Для работы приложения в kubernetes необходимо описать их желаемое состояние либо в YAML-манифестах, либо с помощью командной строки.
+Вся конфигурация находится в каталоге `./kubernetes/reddit`.
+
+Запустим на кластере minikube:
+
+```
+kubectl apply -f kubernetes/reddit/
+
+```
+
+По-умолчанию все сервисы имеют тип ClusterIP - это значит, что сервис располагается на внутреннем диапазоне IP-адресов кластера.
+Снаружи до него нет доступа. Тип NodePort - на каждой ноде кластера открывает порт из диапазона 30000-32767 и переправляет трафик с этого порта на тот, который указан в targetPort Pod (похоже на стандартный expose в docker).
+
+Опишем порт в `ui-service.yml`:
+
+```
+spec:
+  type: NodePort
+  ports:
+  - nodePort: 32092
+    port: 9292
+    protocol: TCP
+    targetPort: 9292
+  selector:
+```
+
+и 
+
+```
+minikube service ui
+
+|-----------|------|-------------|-----------------------------|
+| NAMESPACE | NAME | TARGET PORT |             URL             |
+|-----------|------|-------------|-----------------------------|
+| default   | ui   |        9292 | http://192.168.99.101:30792 |
+|-----------|------|-------------|-----------------------------|
+🎉  Opening service default/ui in default browser...
+
+```
+
+[pict-1](kubernetes/img/kub2-1.jpg)
+
+**Dashboard**
+
+```
+minikube service kubernetes-dashboard -n kube-system
+```
+
+В Dashboard можно:
+- Отслеживать состояние кластера и рабочих нагрузок в нем;
+- Создавать новые объекты (загружать YAML-файлы);
+- Удалять и изменять объекты (кол-во реплик, YAML-файлы);
+- Отслеживать логи в POD-ах;
+- При включении Heapster-аддона смотреть нагрузку на POD-ах;
+- и т. д.
+
+
+**Namespace**
+
+Отделим среду для разработки приложения от всего остального кластера. Для этого создадим свой Namespace `dev`:
+
+```
+cat dev-namespace.yml
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+```
+
+Создаем Namespace и запускаем приложение в dev неймспейсе:
+
+```
+kubectl apply -f dev-namespace.yml
+
+kubectl apply -n dev -f kubernetes/reddit/
+```
+
+Проверим результат:
+
+```
+minikube service ui -n dev
+```
+
+Удалим:
+
+```
+kubectl delete -n dev -f kubernetes/reddit/
+
+```
+
+
+### Yandex Cloud Managed Service for kubernetes
+
+
+Создаем клпстер и группу хостов. Подключаемся к кластеру:
+
+```
+yc managed-kubernetes cluster get-credentials meno-claster --external
+```
+
+Проверим подключение к нашему кластеру:
+
+```
+kubectl cluster-info --kubeconfig /home/meno/.kube/config
+```
+```
+kubectl config current-context
+yc-meno-claster
+```
+
+
+Запустим наше приложение в K8s. Создадим dev namespace:
+
+```
+kubectl apply -f ./kubernetes/reddit/dev-namespace.yml
+```
+И задеплоим наше приложение:
+
+```
+kubectl apply -f ./kubernetes/reddit/ -n dev
+```
+
+Проверим развернулись ли наши поды:
+
+```
+kubectl get pods -n dev
+```
+
+После того как статусы станут `Running`, определим по какому адресу обратимся к нашему кластеру:
+
+```
+kubectl get nodes -o wide
+
+
+NAME                        STATUS   ROLES    AGE     VERSION    INTERNAL-IP   EXTERNAL-IP       OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
+cl16mhlpc65fktupj9es-apic   Ready    <none>   9m36s   v1.19.10   10.128.0.25   178.154.254.139   Ubuntu 20.04.2 LTS   5.4.0-74-generic   docker://20.10.7
+cl16mhlpc65fktupj9es-obuc   Ready    <none>   9m27s   v1.19.10   10.128.0.12   84.201.130.18     Ubuntu 20.04.2 LTS   5.4.0-74-generic   docker://20.10.7
+```
+
+и порт публикации:
+
+```
+kubectl describe service ui -n dev | grep NodePort
+
+Type: NodePort
+NodePort: <unset> 31945/TCP
+```
+
+[pict-2](kubernetes/img/kub2-2.jpg)
