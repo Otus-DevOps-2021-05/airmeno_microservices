@@ -2147,7 +2147,7 @@ kubectl delete -n dev -f kubernetes/reddit/
 ### Yandex Cloud Managed Service for kubernetes
 
 
-Создаем клпстер и группу хостов. Подключаемся к кластеру:
+Создаем кластер и группу хостов. Подключаемся к кластеру:
 
 ```
 yc managed-kubernetes cluster get-credentials meno-claster --external
@@ -2198,7 +2198,7 @@ cl16mhlpc65fktupj9es-obuc   Ready    <none>   9m27s   v1.19.10   10.128.0.12   8
 kubectl describe service ui -n dev | grep NodePort
 
 Type: NodePort
-NodePort: <unset> 31945/TCP
+NodePort: <unset> 32092/TCP
 ```
 
 ![pict-2](kubernetes/img/kub2-2.jpg)
@@ -2228,10 +2228,141 @@ yc-k8s-dev
 
 > https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/
 
-> https://8gwifi.org/docs/kube-dash.jsp
-
 > https://www.liquidweb.com/kb/how-to-install-and-configure-the-kubernetes-dashboard/
 
 ```
 curl https://raw.githubusercontent.com/kubernetes/dashboard/v2.3.1/aio/deploy/recommended.yaml -o dashboard.yml
 ```
+
+Отредактируем `dashboard.yml`, добавим параметр `NodePort`:
+
+```
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  ports:
+    - port: 443
+      targetPort: 8443
+  selector:
+    k8s-app: kubernetes-dashboard
+  type: NodePor
+```
+
+Применим и проверим:
+
+```
+kubectl apply -f dashboard.yml
+
+kubectl get deployments -n kubernetes-dashboard
+
+NAME                        READY   UP-TO-DATE   AVAILABLE   AGE
+dashboard-metrics-scraper   1/1     1            1           3m17s
+kubernetes-dashboard        1/1     1            1           3m18s
+```
+
+```
+kubectl get services -n kubernetes-dashboard
+
+NAME                        TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)         AGE
+dashboard-metrics-scraper   ClusterIP   10.96.218.200   <none>        8000/TCP        4m10s
+kubernetes-dashboard        NodePort    10.96.207.60    <none>        443:32657/TCP   4m11s
+```
+
+Чтобы использовать дашборд Kubernetes, нам нужно создать пользователя с правами администратора. Пользователь admin может изменять объекты во всех пространствах имен и управлять любыми компонентами кластера.
+
+Создадим файл манифеста учетной записи службы, в котором мы определим пользователя с правами администратора для kube-admin и связанное с ним пространство имен, к которому у него есть доступ.
+
+```
+cat admin-sa.yml
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-admin
+  namespace: kube-system
+```
+
+Применим параметры:
+
+```
+kubectl apply -f admin-sa.yml
+```
+
+Далее привяжем роль cluster-admin к созданному пользователю:
+
+```
+cat dashboard-admin.yml
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:  
+  name: kube-admin
+roleRef:  
+  apiGroup: rbac.authorization.k8s.io  
+  kind: ClusterRole  
+  name: cluster-admin
+subjects:  
+  - kind: ServiceAccount    
+    name: kube-admin    
+    namespace: kube-system
+```
+
+```
+kubectl apply -f dashboard-admin.yml
+```
+
+Сгенеририруем токен для учетной записи `kube-admin`. Это необходимо для безопасности и дальнейшего использования пользователя в других системах, пространствах имен или кластерах:
+
+```
+SA_NAME="kube-admin"
+```
+```
+kubectl -n kube-system describe secret $(kubectl -n kube-system get secret | grep ${SA_NAME} | awk '{print $1}')
+
+
+Name:         kube-admin-token-fxl2z
+Namespace:    kube-system
+Labels:       <none>
+Annotations:  kubernetes.io/service-account.name: kube-admin
+              kubernetes.io/service-account.uid: e3d4e528-8d6b-40a7-b1c7-9d75a483cdf6
+
+Type:  kubernetes.io/service-account-token
+
+Data
+====
+token:      eyJhbGciOiJSUzI1NiIsImtpZCI6Ik1wanBPZTAwc3JuQ050aXhseUNEZ2JUTE9zelo1TTF6WkZJZDNNeno5bEkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlLXN5c3RlbSIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJrdWJlLWFkbWluLXRva2VuLWZ4bDJ6Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQubmFtZSI6Imt1YmUtYWRtaW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC51aWQiOiJlM2Q0ZTUyOC04ZDZiLTQwYTctYjFjNy05ZDc1YTQ4M2NkZjYiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6a3ViZS1zeXN0ZW06a3ViZS1hZG1pbiJ9.bmDQVEIIe8m9zBcifnHydtCuefTmU8Ke7BperTvSzrJtxUXzCL4Dq7hVjhi8Fxs5y0hpWkHBK-FkRGy_uUvKlZ0vwYhPl6lH_FeTYBtzKGYIAX4ildXrSF_QgjMnUlOXW1_Ui_CV1JZaIpHdlaQQ9LxfJ1uHz-N4hE4jmRQPhK7W3-bc5umUsL2VsExRAV6iSEYGPzu5g-SM2el_ZE7blAgJ8dSYhIqN5j4-9xjJpan-i5WUy4oTjzV0jxxwFwyKttS07Cf-2ngBhxyBAKexrOkL0iwxBuciLlcJyAIsRHilb3yOBkgV-hdZX1YdwisHJuv2C-91rB-IaTUwBoFP1w
+ca.crt:     1066 bytes
+namespace:  11 bytes
+```
+
+Сохраним токен и как можно безопасно. Нам нужно будет значение `token`.
+
+```
+kubectl get service -n kubernetes-dashboard | grep dashboard
+
+dashboard-metrics-scraper   ClusterIP   10.96.218.200   <none>        8000/TCP        29m
+kubernetes-dashboard        NodePort    10.96.207.60    <none>        443:32657/TCP   29m
+```
+
+В нашей конфигурации используется порт 32657. Чтобы получить доступ к дашборду выполним:
+
+```
+kubectl proxy
+
+Starting to serve on 127.0.0.1:8001
+```
+
+Перейдем по адресу: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/.
+
+![pict-3](kubernetes/img/kub2-3.jpg)
+
+Вводим наш токен и переходим в дашборд:
+
+![pict-4](kubernetes/img/kub2-4.jpg)
