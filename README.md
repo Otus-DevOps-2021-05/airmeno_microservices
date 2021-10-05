@@ -2010,6 +2010,9 @@ fhmsb1mbihf08h0bv9re   Ready    master   4m1s   v1.19.14
 
 ## Kubernetes 2 (Запуск кластера и приложения. Модель безопасности)
 
+<details>
+  <summary>Решение</summary>
+
 ### Разворачиваем Kubernetes локально
 
 ```
@@ -2366,3 +2369,353 @@ Starting to serve on 127.0.0.1:8001
 Вводим наш токен и переходим в дашборд:
 
 ![pict-4](kubernetes/img/kub2-4.jpg)
+
+
+</details>
+
+## Kubernetes 3 (Kubernetes. Networks, Storages.)
+
+
+Поднимем наш кластер kubernetes через terraform:
+
+```
+kubernetes/terraform-k8s$ terraform apply
+
+yc managed-kubernetes cluster get-credentials k8s-dev --external --force
+```
+
+Развернем наше приложение:
+
+```
+kubectl apply -f ./kubernetes/reddit/dev-namespace.yml
+kubectl apply -f ./kubernetes/reddit/ -n dev
+```
+
+### LoadBalance
+
+Настроим соответствующим образом Service UI:
+
+```
+cat kubernetes\reddit\ui-service.yml 
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    app: reddit
+    component: ui
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    nodePort: 32092
+    protocol: TCP
+    targetPort: 9292
+  selector:
+    app: reddit
+    component: ui
+```
+
+```
+kubectl apply -f ui-service.yml -n dev
+
+```
+
+Проверим наш LoadBalancer
+
+```
+kubectl get service -n dev --selector component=ui
+
+
+NAME   TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)        AGE
+ui     LoadBalancer   10.96.142.193   84.201.134.160   80:32092/TCP   5m17s
+```
+
+Наше приложением доступно по адресу  http://84.201.134.160
+
+![pict-1](kubernetes/img/kub3-1.jpg)
+
+
+**Недостатки LoadBalancer**
+
+- Нельзя управлять с помощью http URI (L7-балансировщика)
+- Используются только облачные балансировщики (AWS, GCP)
+- Нет гибких правил работы с трафиком
+
+### Ingress
+
+Для более удобного управления входящим снаружи трафиком и решения недостатков LoadBalancer можно использовать другой объект Kubernetes - Ingress.
+
+Ingress - это набор правил внутри кластера Kuberntes, предназначенных для того, чтобы входящие подключения могли достичь сервисов (Services) Сами по себе  Ingress'ы это просто правила. Для их применения нужен Ingress Controller.
+
+Ingress Controller - это скорее плагин (а значит и отдельный POD), который состоит из 2-х функциональных частей:
+
+- Приложение, которое отслеживает через k8s API новые объекты Ingress и обновляет конфигурацию балансировщика
+- Балансировщик (Nginx, haproxym traefik, ...), который и занимается управлением сетевым трафиком.
+
+Основные задачи, решаемые с помощью Ingress'ов:
+- Организация единой точки входа в приложения снаружи
+- Обеспечение балансировки трафика
+- Терминация SSL
+- Виртуальный хостинг на основе имен и т. д.
+
+
+Установим Ingress Controller:
+
+```
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.34.1/deploy/static/provider/cloud/deploy.yaml
+```
+ingress установился в namespace ingress-nginx.
+
+Создадим Ingress для сервиса UI:
+
+```
+cat ui-ingress.yml
+
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ui
+spec:
+  backend:
+    serviceName: ui
+    servicePort: 80
+```
+
+```
+kubectl apply -f ui-ingress.yml -n dev
+
+
+NAME   CLASS    HOSTS   ADDRESS          PORTS   AGE
+ui     <none>   *       84.201.130.203   80      2m58s
+```
+
+Наше приложение будет доступно - http://84.201.130.203/
+
+
+Уберем один балансировщик (LoadBalancer). Обновим сервис для UI:
+
+```
+cat ui-service.yml
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    app: reddit
+    component: ui
+spec:
+  type: NodePort
+  ports:
+  - port: 9292
+    protocol: TCP
+    targetPort: 9292
+  selector:
+    app: reddit
+    component: ui
+```
+
+```
+kubectl apply -f ui-service.yml -n dev
+```
+
+Заставим работать Ingress Controller как классический веб:
+
+```
+cat ui-ingress.yml
+
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ui
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /*
+        backend:
+          serviceName: ui
+          servicePort: 9292
+```
+
+Защитим наш сервис с помощью TLS:
+
+```
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=84.201.130.203"
+```
+
+И загрузит сертификат в кластер kubernetes
+
+```
+kubectl create secret tls ui-ingress --key tls.key --cert tls.crt -n dev
+```
+
+Проверим
+```
+kubectl describe secret ui-ingress -n dev
+```
+
+Настроим Ingress на прием только HTTPS траффика:
+
+```
+cat ui-ingress.yml
+
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ui
+  annotations:
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  tls:
+  - secretName: ui-ingress
+  backend:
+    serviceName: ui
+    servicePort: 9292
+```
+
+Применим:
+
+```
+kubectl apply -f ui-ingress.yml -n dev
+```
+
+Иногда протокол HTTP может не удалиться у существующего Ingress правила, тогда нужно его вручную удалить и пересоздать:
+
+```
+kubectl delete ingress ui -n dev
+kubectl apply -f ui-ingress.yml -n dev
+```
+
+![pict-2](kubernetes/img/kub3-2.jpg)
+
+
+### Задание со ⭐
+
+Описать создаваемый объект Secret в виде Kubernetes-манифеста.
+
+> https://kubernetes.io/docs/concepts/configuration/secret/
+
+> https://kubernetes.io/docs/concepts/configuration/secret/#tls-secrets
+
+
+```
+cat secret.yml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ui-ingress
+type: kubernetes.io/tls
+data:
+  # the data is abbreviated in this example
+  tls.crt: |
+        MIIC2DCCAcCgAwIBAgIBATANBgkqh ...
+  tls.key: |
+        MIIEpgIBAAKCAQEA7yn3bRHQ5FHMQ ...
+
+```
+
+### Хранилище для базы
+
+Для начала создадим диск PersitentVolume в ya.cloud:
+
+```
+yc compute disk create \
+ --name k8s \
+ --zone ru-central1-a \
+ --size 4 \
+ --description "disk for k8s"
+```
+
+Проверим и запомним id созданного диска:
+
+```
+yc compute disk list
+```
+
+Создадим PV в ya.cloud:
+
+```
+cat mongo-volume.yml
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mongo-pv
+spec:
+  capacity:
+    storage: 4Gi
+  accessModes:
+    - ReadWriteOnce
+  csi:
+    driver: disk-csi-driver.mks.ycloud.io
+    fsType: ext4
+    volumeHandle: fhme7f5o386ei6g5prcr
+```
+
+Создадим PVC (PersitentVolumeClaim)
+
+```
+cat mongo-claim.yml
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+spec:
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+  volumeName: mongo-pv
+```
+
+и подключим созданный PVC
+
+```
+cat mongo-deployment.yml
+
+
+....
+
+    spec:
+      containers:
+      - image: mongo:3.2
+        name: mongo
+        volumeMounts:
+        - name: mongo-persistent-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-persistent-storage
+        persistentVolumeClaim:
+          claimName:  mongo-pvc
+```
+
+
+Соберем:
+
+```
+kubectl apply -f mongo-volume.yml -n dev
+kubectl apply -f mongo-claim.yml -n dev
+kubectl apply -f mongo-deployment.yml -n dev
+```
+
+Дождаемся пересоздания POD'а (занимает до 10 минут). Для проверки можно создать пост, после удалить deployment и снова создадим деплой mongo:
+
+```
+kubectl delete deploy mongo -n dev
+kubectl apply -f mongo-deployment.yml -n dev
+```
