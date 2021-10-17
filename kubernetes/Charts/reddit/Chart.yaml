@@ -1,0 +1,7 @@
+name: reddit
+version: 1.0.0
+description: OTUS sample reddit application
+maintainers:
+  - name: airmeno
+    email: meno@list.ru
+appVersion: 1.0

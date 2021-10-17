@@ -2375,6 +2375,8 @@ Starting to serve on 127.0.0.1:8001
 
 ## Kubernetes 3 (Kubernetes. Networks, Storages.)
 
+<details>
+  <summary>Решение</summary>
 
 Поднимем наш кластер kubernetes через terraform:
 
@@ -2719,3 +2721,257 @@ kubectl apply -f mongo-deployment.yml -n dev
 kubectl delete deploy mongo -n dev
 kubectl apply -f mongo-deployment.yml -n dev
 ```
+</details>
+
+## Kubernetes 4 (CI/CD в Kubernetes)
+
+<details>
+  <summary>Решение</summary>
+
+### 1. Работа с Helm
+
+Helm - пакетный менеджер для Kubernetes. С его помощью можно:
+- Стандартизировать поставку приложения в Kubernetes
+- Декларировать инфраструктуру
+- Деплоить новые версии приложения
+
+
+Скачаем, распакуем и установим:
+
+```
+curl https://get.helm.sh/helm-v2.17.0-linux-amd64.tar.gz
+
+mv helm /usr/local/bin/
+
+helm version
+```
+
+Как вилим Helm читает конфигурацию kubectl ( ~/.kube/config ) и сам определяет текущий контекст (кластер, пользователь, неймспейс).
+
+Если необходимо сменить кластер: `kubectl config set-context` или подгружаем собственный config-файл флагом `--kubecontext`.
+
+Установим серверную часть Helm’а - Tiller. Tiller - это аддон Kubernetes, т.е. Pod, который общается с API Kubernetes.
+
+Создаем файл tiller.yml:
+
+```
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tiller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: tiller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tiller
+    namespace: kube-system
+```
+
+```
+kubectl apply -f tiller.yml
+```
+
+Запустим tiller-сервер с ServiceAccount для роли RBAC, необходимый для работы.
+
+```
+helm init --service-account tiller
+```
+
+Проверим
+
+```
+kubectl get pods -n kube-system --selector app=helm
+```
+
+**Charts**
+
+Chart - это пакет в Helm.
+
+Создаем директории:
+
+```
+mkdir kubernetes/Charts
+
+mkdir Charts/{comment,post,reddit,ui}
+```
+
+Получим такую структуру:
+
+```
+├── Charts
+  ├── comment
+  ├── post
+  ├── reddit
+  └── ui
+```
+
+Создаем разработку Chart’ов для компонентов нашей инфраструктуры приложения.
+
+> Запускаем Ingress `kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.34.1/deploy/static/provider/cloud/deploy.yaml`
+
+
+После подготовки все структуры файлов и шаблонов, скачивание архивов `charts`, попробуем запусить приложение:
+
+```
+/Charts] $ helm install reddit --name reddit-test
+```
+
+Найдем наш адрес Ingress:
+
+```
+kubectl get ingress
+
+NAME             CLASS    HOSTS   ADDRESS          PORTS   AGE
+reddit-test-ui   <none>   *       178.154.206.52   80      3m49s
+```
+
+![pict-4-1](kubernetes/img/kub4-1.jpg)
+
+
+**Управление зависимостями**
+
+Проблема в том, что UI-сервис не знает как правильно ходить в post и comment сервисы. Ведь их имена теперь динамические и зависят от имен
+чартов. В Dockerfile UI-сервиса уже заданы переменные окружения.Надо, чтобы они указывали на нужные бекенды.
+
+```
+cat ui/deployments.yaml
+
+
+...
+
+spec:
+  containers:
+  - image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+    name: ui
+    ports:
+    - containerPort: {{ .Values.service.internalPort }}
+      name: ui
+    env:
+    - name: POST_SERVICE_HOST
+      value: {{  .Values.postHost | default (printf "%s-post" .Release.Name) }}
+    - name: POST_SERVICE_PORT
+      value: {{  .Values.postPort | default "5000" | quote }}
+    - name: COMMENT_SERVICE_HOST
+      value: {{  .Values.commentHost | default (printf "%s-comment" .Release.Name) }}
+    - name: COMMENT_SERVICE_PORT
+      value: {{  .Values.commentPort | default "9292" | quote }}
+    - name: ENV
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+
+```
+
+Добавим в ui/values.yaml:
+
+
+```
+...
+
+postHost:
+postPort:
+commentHost:
+commentPort:
+```
+
+Можно задавать теперь переменные для зависимостей прямо в `values.yaml` самого Chart’а reddit. Они перезаписывают значения переменных из зависимых чартов:
+
+
+```
+cat reddit/values.yaml
+
+comment:
+  image:
+    repository: airmeno/comment
+    tag: latest
+  service:
+    externalPort: 9292
+
+post:
+  image:
+    repository: airmeno/post
+    tag: latest
+  service:
+    externalPort: 5000
+
+ui:
+  image:
+    repository: airmeno/ui
+    tag: latest
+  service:
+    externalPort: 9292
+```
+
+Обновим зависимости чарта reddit:
+
+```
+helm dep update ./reddit
+```
+
+Обновим релиз, установленный в k8s:
+
+```
+helm upgrade reddit-test ./reddit
+```
+
+### 2. Развертывание Gitlab в Kubernetes
+
+Поднимем кластер Kubernetes и подключимся к нему:
+
+```
+yc managed-kubernetes cluster get-credentials otus-meno --external --force
+```
+
+Запускаем Ingress и проверим:
+
+```
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.34.1/deploy/static/provider/cloud/deploy.yaml
+```
+
+```
+kubectl apply -f tiller.yml
+helm init --service-account tiller
+```
+
+Установим GitLab ставим с помощью Helm Chart’а из пакета Omnibus:
+
+```
+helm repo add gitlab https://charts.gitlab.io
+
+helm fetch gitlab/gitlab-omnibus --version 0.1.37 --untar 
+cd gitlab-omnibus
+```
+
+Делаем настройки согласно инструкции и установим GitLab:
+
+```
+helm install --name gitlab . -f values.yaml
+```
+
+```
+kubectl get ingress
+
+NAME            CLASS    HOSTS                                                                   ADDRESS         PORTS     AGE
+gitlab-gitlab   <none>   gitlab-gitlab,registry.example.com,mattermost.example.com + 1 more...   62.84.117.220   80, 443   9m27s
+```
+
+```
+sudo echo "62.84.117.220 gitlab-gitlab staging production" >> /etc/hosts
+```
+Перейдем по адресу `http://gitlab-gitlab`, сделаем необходимые настройки. Перенесем исходные коды сервисов в локальную папку и запушим в gitlab. 
+
+
+### 3. Запуск CI/CD конвейера в Kubernetes
+
+Запустим проект согласно инструкций. Полученные файлы пайплайнов для сервисов перенесем в директорию Charts/gitlabci.
+
+</details>  
